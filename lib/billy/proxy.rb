@@ -1,18 +1,22 @@
 require 'cgi'
-require 'uri'
 require 'eventmachine'
 
 module Billy
   class Proxy
+    extend Forwardable
+    attr_reader :request_handler
+
+    def_delegators :request_handler, :stub, :reset, :reset_cache, :restore_cache, :handle_request
+
     def initialize
+      @request_handler = Billy::RequestHandler.new
       reset
-      @cache = Billy::Cache.new
     end
 
     def start(threaded = true)
       if threaded
         Thread.new { main_loop }
-        sleep(0.01) while @signature.nil?
+        sleep(0.01) while (not defined?(@signature)) || @signature.nil?
       else
         main_loop
       end
@@ -23,64 +27,32 @@ module Billy
     end
 
     def host
-      'localhost'
+      Billy.config.proxy_host
     end
 
     def port
       Socket.unpack_sockaddr_in(EM.get_sockname(@signature)).first
     end
 
-    def call(method, url, headers, body)
-      stub = find_stub(method, url)
-      unless stub.nil?
-        begin
-          query_string = URI.parse(url).query || ""
-        rescue URI::InvalidURIError
-          query_string = ""
-        end
-        params = CGI.parse(query_string)
-        stub.call(params, headers, body)
-      end
-    end
-
-    def stub(url, options = {})
-      ret = ProxyRequestStub.new(url, options)
-      @stubs.unshift ret
-      ret
-    end
-
-    def reset
-      @stubs = []
-    end
-
-    def reset_cache
-      @cache.reset
-    end
-
-    def restore_cache
-      @cache.reset
-      @cache.load_dir
+    def cache
+      Billy::Cache.instance
     end
 
     protected
 
-    def find_stub(method, url)
-      @stubs.find {|stub| stub.matches?(method, url) }
-    end
-
     def main_loop
       EM.run do
         EM.error_handler do |e|
-          puts e.class.name, e
-          puts e.backtrace.join("\n")
+          Billy.log :error, "#{e.class} (#{e.message}):"
+          Billy.log :error, e.backtrace.join("\n")
         end
 
-        @signature = EM.start_server('127.0.0.1', 0, ProxyConnection) do |p|
-          p.handler = self
-          p.cache = @cache
+        @signature = EM.start_server('127.0.0.1', Billy.config.proxy_port, ProxyConnection) do |p|
+          p.handler = request_handler
+          p.cache = @cache if defined?(@cache)
         end
 
-        Billy.log(:info, "Proxy listening on #{url}")
+        Billy.log(:info, "puffing-billy: Proxy listening on #{url}")
       end
     end
   end
